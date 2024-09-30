@@ -11,16 +11,16 @@ from transformers import (
     AutoTokenizer,
     Trainer,
     TrainingArguments,
-    DataCollatorForSeq2Seq
+    DataCollatorForLanguageModeling
 )
 import numpy as np
 from sklearn.model_selection import train_test_split
 
 # --------------------- Configuration --------------------- #
 
-# Model names
-GENERATOR_MODEL_NAME: str = "facebook/llama-3.1-8b-instruct" 
-EVALUATOR_MODEL_NAME: str = "t5-large"                       # T5 model for evaluation
+# Model names 
+GENERATOR_MODEL_NAME: str = "facebook/llama-3.1-8b-instruct"
+EVALUATOR_MODEL_NAME: str = "t5-large"
 
 # File paths
 INSTRUCTIONS_FILE: str = "instructions.txt"
@@ -58,9 +58,6 @@ logger: logging.Logger = logging.getLogger(__name__)
 def set_random_seeds(seed: int = 42) -> None:
     """
     Set random seeds for reproducibility.
-    
-    Args:
-        seed (int): The seed value to set.
     """
     random.seed(seed)
     np.random.seed(seed)
@@ -69,15 +66,10 @@ def set_random_seeds(seed: int = 42) -> None:
         torch.cuda.manual_seed_all(seed)
     logger.info(f"Random seeds set to {seed}.")
 
+
 def load_instructions(file_path: str) -> List[str]:
     """
     Load instructions from a text file.
-    
-    Args:
-        file_path (str): Path to the instructions file.
-        
-    Returns:
-        List[str]: A list of instruction strings.
     """
     if not os.path.exists(file_path):
         logger.error(f"File {file_path} does not exist.")
@@ -87,94 +79,68 @@ def load_instructions(file_path: str) -> List[str]:
     logger.info(f"Loaded {len(instructions)} instructions.")
     return instructions
 
+
 def generate_response_batch(
     instructions: List[str],
     model: AutoModelForCausalLM,
     tokenizer: AutoTokenizer,
     device: torch.device,
+    batch_size: int = 8,
     **gen_kwargs
 ) -> List[str]:
     """
     Generate responses for a batch of instructions.
-    
-    Args:
-        instructions (List[str]): List of instruction strings.
-        model (AutoModelForCausalLM): The generator model.
-        tokenizer (AutoTokenizer): Tokenizer for the generator model.
-        device (torch.device): The device to run the model on.
-        **gen_kwargs: Generation keyword arguments.
-        
-    Returns:
-        List[str]: Generated response strings.
     """
     responses: List[str] = []
-    batch_size: int = gen_kwargs.get('batch_size', 8)
-    
+
     for i in range(0, len(instructions), batch_size):
         batch = instructions[i:i+batch_size]
-        inputs = tokenizer(batch, return_tensors="pt", padding=True).to(device)
+        inputs = tokenizer(batch, return_tensors="pt", padding=True, truncation=True).to(device)
         with torch.no_grad():
             outputs = model.generate(
                 input_ids=inputs.input_ids,
                 attention_mask=inputs.attention_mask,
-                max_length=gen_kwargs.get('max_length', 150),
-                num_beams=gen_kwargs.get('num_beams', 5),
-                temperature=gen_kwargs.get('temperature', 1.0),
-                early_stopping=gen_kwargs.get('early_stopping', True)
+                **gen_kwargs
             )
         decoded = [tokenizer.decode(output, skip_special_tokens=True) for output in outputs]
         responses.extend(decoded)
         logger.debug(f"Generated batch {i//batch_size + 1}: {len(decoded)} responses.")
     return responses
 
+
 def generate_bad_response_batch(
     instructions: List[str],
     model: AutoModelForCausalLM,
     tokenizer: AutoTokenizer,
     device: torch.device,
+    batch_size: int = 8,
     **gen_kwargs
 ) -> List[str]:
     """
     Generate suboptimal (bad) responses for a batch of instructions.
-    
-    Args:
-        instructions (List[str]): List of instruction strings.
-        model (AutoModelForCausalLM): The generator model.
-        tokenizer (AutoTokenizer): Tokenizer for the generator model.
-        device (torch.device): The device to run the model on.
-        **gen_kwargs: Generation keyword arguments.
-        
-    Returns:
-        List[str]: Generated bad response strings.
     """
-    # Using a negative prompt to generate suboptimal responses
-    negative_prompts = [f"{inst} Provide an incorrect or suboptimal answer." for inst in instructions]
-    return generate_response_batch(negative_prompts, model, tokenizer, device, **gen_kwargs)
+    # Adjust generation parameters to increase randomness
+    gen_kwargs['temperature'] = gen_kwargs.get('temperature', 1.5)
+    gen_kwargs['top_p'] = gen_kwargs.get('top_p', 0.9)
+    gen_kwargs['do_sample'] = True  # Enable sampling
+
+    return generate_response_batch(instructions, model, tokenizer, device, batch_size=batch_size, **gen_kwargs)
+
 
 def evaluate_responses_batch(
     response_pairs: List[Tuple[str, str, str]],
     evaluator_model: AutoModelForSeq2SeqLM,
     evaluator_tokenizer: AutoTokenizer,
     device: torch.device,
+    batch_size: int = 8,
     **gen_kwargs
 ) -> List[str]:
     """
     Evaluate response pairs to generate judgments.
-    
-    Args:
-        response_pairs (List[Tuple[str, str, str]]): List of tuples containing (instruction, good_response, bad_response).
-        evaluator_model (AutoModelForSeq2SeqLM): The evaluator model (T5).
-        evaluator_tokenizer (AutoTokenizer): Tokenizer for the evaluator model.
-        device (torch.device): The device to run the evaluator model on.
-        **gen_kwargs: Generation keyword arguments.
-        
-    Returns:
-        List[str]: Generated judgment strings.
     """
     judgments: List[str] = []
     batch_prompts: List[str] = []
-    batch_size: int = gen_kwargs.get('batch_size', 8)
-    
+
     for instruction, resp_a, resp_b in response_pairs:
         prompt = (
             f"Instruction: {instruction}\n\n"
@@ -183,23 +149,22 @@ def evaluate_responses_batch(
             f"Which response is better? Explain why."
         )
         batch_prompts.append(prompt)
-    
+
     for i in range(0, len(batch_prompts), batch_size):
         batch = batch_prompts[i:i+batch_size]
-        inputs = evaluator_tokenizer(batch, return_tensors="pt", padding=True).to(device)
+        inputs = evaluator_tokenizer(batch, return_tensors="pt", padding=True, truncation=True).to(device)
         with torch.no_grad():
             outputs = evaluator_model.generate(
                 input_ids=inputs.input_ids,
                 attention_mask=inputs.attention_mask,
-                max_length=gen_kwargs.get('max_length', 200),
-                num_beams=gen_kwargs.get('num_beams', 5),
-                temperature=gen_kwargs.get('temperature', 1.0),
-                early_stopping=gen_kwargs.get('early_stopping', True)
+                **gen_kwargs
             )
         decoded = [evaluator_tokenizer.decode(output, skip_special_tokens=True) for output in outputs]
         judgments.extend(decoded)
         logger.debug(f"Evaluated batch {i//batch_size + 1}: {len(decoded)} judgments.")
     return judgments
+
+
 class SyntheticDataset(Dataset):
     """
     PyTorch Dataset for synthetic data consisting of instruction-response pairs and judgments.
@@ -213,12 +178,6 @@ class SyntheticDataset(Dataset):
     ) -> None:
         """
         Initialize the dataset by tokenizing inputs and labels.
-        
-        Args:
-            tokenizer (AutoTokenizer): Tokenizer for the model.
-            response_pairs (List[Tuple[str, str, str]]): List of tuples containing (instruction, good_response, bad_response).
-            judgments (List[str]): List of judgment strings.
-            max_length (int): Maximum token length for inputs and labels.
         """
         self.tokenizer: AutoTokenizer = tokenizer
         self.data: List[Tuple[str, str, str]] = response_pairs
@@ -238,13 +197,15 @@ class SyntheticDataset(Dataset):
                 prompt,
                 max_length=self.max_length,
                 truncation=True,
-                padding='max_length'
+                padding='max_length',
+                return_tensors='pt'
             )
             label_enc = self.tokenizer(
                 judgment,
                 max_length=self.max_length,
                 truncation=True,
-                padding='max_length'
+                padding='max_length',
+                return_tensors='pt'
             )
             self.inputs.append(input_enc)
             self.labels.append(label_enc['input_ids'])
@@ -254,9 +215,19 @@ class SyntheticDataset(Dataset):
         return len(self.data)
 
     def __getitem__(self, index: int) -> dict:
-        item: dict = {key: torch.tensor(val[index]) for key, val in self.inputs[index].items()}
-        item['labels'] = torch.tensor(self.labels[index])
-        return item
+        input_enc = {key: val.squeeze() for key, val in self.inputs[index].items()}
+        labels = self.labels[index].squeeze()
+
+        # For causal language modeling, the labels are the same as the input_ids shifted by one position
+        input_ids = input_enc['input_ids']
+        labels = labels.clone()
+        labels[labels == self.tokenizer.pad_token_id] = -100  # Ignore padding in loss computation
+
+        return {
+            'input_ids': input_ids,
+            'attention_mask': input_enc['attention_mask'],
+            'labels': labels
+        }
 
 # --------------------- Main Training Pipeline --------------------- #
 
@@ -305,11 +276,13 @@ def main() -> None:
     # Generate good and bad responses
     logger.info("Generating good responses...")
     good_responses: List[str] = generate_response_batch(
-        instructions, generator_model, generator_tokenizer, device, **GENERATION_PARAMS, batch_size=BATCH_SIZE
+        instructions, generator_model, generator_tokenizer, device,
+        batch_size=BATCH_SIZE, **GENERATION_PARAMS
     )
     logger.info("Generating bad responses...")
     bad_responses: List[str] = generate_bad_response_batch(
-        instructions, generator_model, generator_tokenizer, device, **GENERATION_PARAMS, batch_size=BATCH_SIZE
+        instructions, generator_model, generator_tokenizer, device,
+        batch_size=BATCH_SIZE, **GENERATION_PARAMS
     )
 
     response_pairs: List[Tuple[str, str, str]] = list(zip(instructions, good_responses, bad_responses))
@@ -318,7 +291,8 @@ def main() -> None:
     # Evaluate responses to generate judgments
     logger.info("Evaluating responses to generate judgments...")
     judgments: List[str] = evaluate_responses_batch(
-        response_pairs, evaluator_model, evaluator_tokenizer, device, **GENERATION_PARAMS, batch_size=BATCH_SIZE
+        response_pairs, evaluator_model, evaluator_tokenizer, device,
+        batch_size=BATCH_SIZE, max_length=EVALUATOR_MAX_LENGTH, num_beams=5
     )
     logger.info("Generated judgments.")
 
@@ -336,11 +310,10 @@ def main() -> None:
         generator_tokenizer, val_pairs, val_judgments, max_length=MAX_LENGTH
     )
 
-    # Data collator
-    data_collator: DataCollatorForSeq2Seq = DataCollatorForSeq2Seq(
+    # Data collator for causal language modeling
+    data_collator: DataCollatorForLanguageModeling = DataCollatorForLanguageModeling(
         tokenizer=generator_tokenizer,
-        model=generator_model,
-        padding=True
+        mlm=False  # Not using masked language modeling
     )
 
     # Training arguments
@@ -354,7 +327,7 @@ def main() -> None:
         evaluation_strategy="epoch",
         logging_dir='./logs',
         logging_steps=100,
-        fp16=torch.cuda.is_available(),  # Enable mixed precision if CUDA is available
+        fp16=torch.cuda.is_available() and torch.cuda.get_device_capability(0)[0] >= 7,
         seed=SEED,
         load_best_model_at_end=True,
         metric_for_best_model="loss",
@@ -379,9 +352,9 @@ def main() -> None:
         logger.info(f"Starting iteration {iteration + 1}/{NUM_ITERATIONS}...")
 
         # Generate new judgments with the updated model
-        # For simplicity, we'll reuse the evaluator model; ideally, use a separate evaluator or human annotations
         new_judgments: List[str] = evaluate_responses_batch(
-            response_pairs, evaluator_model, evaluator_tokenizer, device, **GENERATION_PARAMS, batch_size=BATCH_SIZE
+            response_pairs, evaluator_model, evaluator_tokenizer, device,
+            batch_size=BATCH_SIZE, max_length=EVALUATOR_MAX_LENGTH, num_beams=5
         )
         logger.info("Generated new judgments.")
 
@@ -412,6 +385,7 @@ def main() -> None:
     trainer.save_model(MODEL_SAVE_PATH)
     generator_tokenizer.save_pretrained(MODEL_SAVE_PATH)
     logger.info("Model training completed and saved successfully.")
+
 
 if __name__ == "__main__":
     main()
