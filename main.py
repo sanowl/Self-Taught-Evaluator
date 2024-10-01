@@ -1,6 +1,5 @@
 import os
 import logging
-import random
 from typing import List, Tuple
 
 import torch
@@ -15,6 +14,7 @@ from transformers import (
 )
 import numpy as np
 from sklearn.model_selection import train_test_split
+import secrets
 
 # --------------------- Configuration --------------------- #
 
@@ -59,7 +59,7 @@ def set_random_seeds(seed: int = 42) -> None:
     """
     Set random seeds for reproducibility.
     """
-    random.seed(seed)
+    secrets.SystemRandom().seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
     if torch.cuda.is_available():
