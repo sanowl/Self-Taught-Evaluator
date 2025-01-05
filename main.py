@@ -1,6 +1,5 @@
 import os
 import logging
-import random
 from typing import List, Tuple, Optional, Dict, Any
 
 import torch
@@ -15,6 +14,7 @@ from transformers import (
 )
 import numpy as np
 from sklearn.model_selection import train_test_split
+import secrets
 
 # Configuration
 GENERATOR_MODEL_NAME: str = "facebook/llama-3.1-8b-instruct"
@@ -47,7 +47,7 @@ logging.basicConfig(
 logger: logging.Logger = logging.getLogger(__name__)
 
 def set_random_seeds(seed: int = 42) -> None:
- random.seed(seed)
+ secrets.SystemRandom().seed(seed)
  np.random.seed(seed)
  torch.manual_seed(seed)
  if torch.cuda.is_available():
