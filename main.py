@@ -177,7 +177,7 @@ class SyntheticDataset(Dataset):
  def __getitem__(self, index: int) -> Dict[str, torch.Tensor]:
   input_enc = {key: val.squeeze() for key, val in self.inputs[index].items()}
   labels = torch.tensor(self.labels[index], dtype=torch.long)
-  labels[labels == self.tokenizer.pad_token_id] = -100  # Ignore padding in loss computation
+  labels[labels == self.tokenizer.pad_token_id] = -100
   return {
    'input_ids': input_enc['input_ids'],
    'attention_mask': input_enc['attention_mask'],
